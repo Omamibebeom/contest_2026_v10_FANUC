@@ -1,7 +1,7 @@
 """
 pi_gpio_controller.py —— A 通道: 用 Modbus TCP 把「顏色」告訴 FANUC 手臂
 
-交握流程 (FANUC_工科賽通訊設定.pdf 的「訊號交握時序 - 辨識顏色」):
+交握流程 (FANUC_工科賽通訊設定v2.pdf 的「訊號交握時序 - 辨識顏色」):
   1. 手臂到辨識位置 → 把 DO[1] (COLOR REQ) 拉 ON        ← ready() 讀這個
   2. 主程式投票 3 秒決定顏色 → 呼叫 send(color)
   3. send(): 寫 R[1] = 顏色代碼 → 等 1 秒 → 把 DO[2] (COLOR ACK) 拉 ON → 保持 HOLD_SEC 秒 → DO[2] OFF、R[1] = 0

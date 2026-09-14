@@ -7,9 +7,9 @@ link.open()
 print("=========================================")
 print(" B 通道 PR[] 寫入與交握測試 (等待 DO[3] 觸發)")
 print("=========================================")
-print("請至 Roboguide 進行以下操作：")
-print("1. 進入 DATA -> Digital Out")
-print("2. 手動將 DO[3] 切換為 ON (模擬手臂發出 GET 請求)")
+print("請在示教器上進行以下操作：")
+print("1. MENU → I/O → Digital，按 IN/OUT 切到 DO")
+print("2. 游標移到 DO[3]，按 ON (模擬手臂發出座標請求)")
 print("程式正在背景輪詢 DO[3] 狀態，隨時等待觸發...\n")
 
 try:
@@ -30,11 +30,11 @@ try:
             link.send(test_cmd)
             
             print(">> [完成] 寫入指令已發送！")
-            print("請至 Roboguide 檢查：")
+            print("請在示教器上檢查：")
             print(f"  1. PR[1] (DATA -> Position Reg) 的 X 應為 {test_x}, Y 應為 {test_y}")
-            print("  2. DO[4] (DATA -> Digital Out) 應轉為 ON (代表座標就緒)")
+            print("  2. DO[4] (MENU → I/O → Digital) 應轉為 ON (代表座標就緒)")
             print("\n-----------------------------------------")
-            print("如需反覆測試，請將 DO[3] 切回 OFF (程式會自動降下 DO[4])，然後再次切為 ON。")
+            print("如需反覆測試，請將 DO[3] 按 OFF (程式會自動降下 DO[4])，然後再次按 ON。")
             
         # 暫停 0.1 秒避免 CPU 100% 滿載
         time.sleep(0.1)

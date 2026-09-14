@@ -3,14 +3,14 @@ main_contest.py —— 比賽主程式 (跑在樹莓派)
 
 兩個通道 (一句話: a 是「這是什麼顏色」, b 是「這個顏色在哪裡」):
   a 通道 (放置板):        手臂從放置板夾起指定物件、舉到鏡頭前 → 程式辨識顏色
-                          → 用 IO 訊號告訴手臂是哪個顏色 → 手臂決定放到哪一區
-  b 通道 (隨機位置放置板): 程式開場拍快照, 算出每件物件的手臂座標 → 手臂送 GET
-                          → 程式照顏色順序回一件的座標 → 手臂去夾
+                          → 把顏色代碼寫進手臂的 R[1] → 手臂決定放到哪一區
+  b 通道 (隨機位置放置板): 程式開場拍快照, 算出每件物件的手臂座標 → 手臂拉 DO[3] 要座標
+                          → 程式照顏色順序把一件的座標寫進 PR[1] → 手臂去夾
 
 賽前準備 (照順序):
   1. vision_tuner.py        調每個顏色的 HSV, 存進 vision_profiles.json
   2. affine_sample_tool.py  取像素↔手臂點位, 抄進 affine_transform.py
-  3. io_test.py             確認 顏色 → IO 訊號 的接線
+  3. io_test.py             確認 顏色 → R[1] 代碼 能正確寫進手臂
   4. 填好下面的 PICK_ORDER (pi_gpio_controller.py 的 IO_CODES 也要填)
 
 執行:
@@ -34,18 +34,18 @@ from affine_transform import pixel_to_arm
 from pi_gpio_controller import PiGPIOController, IO_CODES
 
 # ======= 學生作答區: 隨機位置放置板上物件的夾取順序 (b 通道, 填顏色名) =======
-# 手臂每送一次 GET 就給下一個顏色; 同色兩件就寫兩次 (畫面由左到右給)。
+# 手臂每要一次座標 (DO[3]) 就給下一個顏色; 同色兩件就寫兩次 (畫面由左到右給)。
 # 顏色名要和 vision_profiles.json 存的名稱一樣 (小寫)。
 PICK_ORDER = ["red", "blue", "green"]
 # ================================================================
 
 PROFILES_FILE = "vision_profiles.json"
 WARMUP_FRAMES = 15          # 拍快照前先丟掉的幀數, 等相機曝光穩定
-VOTE_SEC = 3.0              # a 通道 (放置板物件): ready 拉高後投票幾秒
+VOTE_SEC = 3.0              # a 通道 (放置板物件): DO[1] 拉 ON 後投票幾秒
 
 
 class ChannelA:
-    """a 通道 (放置板物件舉到鏡頭前): ready 拉高 → 投票 VOTE_SEC 秒 → 送 IO 訊號。"""
+    """a 通道 (放置板物件舉到鏡頭前): DO[1] 拉 ON → 投票 VOTE_SEC 秒 → 寫 R[1]、拉 DO[2]。"""
 
     def __init__(self, gpio, profiles):
         self.gpio = gpio
@@ -59,7 +59,7 @@ class ChannelA:
         """每一幀呼叫一次, 依狀態做一小步。"""
         ready = self.gpio.ready()
 
-        if self.state == "WAIT_RELEASE":        # 送完 IO 後, 等手臂把 ready 放下才收下一件
+        if self.state == "WAIT_RELEASE":        # 送完 R[1] 後, 等手臂把 DO[1] 放下才收下一件
             if ready == 0:
                 self.state = "WAIT_READY"
             return
@@ -69,7 +69,7 @@ class ChannelA:
                 self.state = "VOTING"
                 self.t0 = time.time()
                 self.votes.clear()
-                print(f"[a] 收到 ready, 投票 {VOTE_SEC} 秒")
+                print(f"[a] 收到 DO[1], 投票 {VOTE_SEC} 秒")
             return
 
         # VOTING: 每一幀投一票給看到的顏色
@@ -81,7 +81,7 @@ class ChannelA:
             return
         if self.votes:
             color, n = self.votes.most_common(1)[0]
-            print(f"[a] 判定 {color} ({n} 票) → 送 IO")
+            print(f"[a] 判定 {color} ({n} 票) → 寫 R[1]")
             self.gpio.send(color)
         else:
             print("[a] 沒看到任何 IO_CODES 裡的顏色 → 送失敗碼")
@@ -90,7 +90,7 @@ class ChannelA:
 
 
 class ChannelB:
-    """b 通道 (隨機位置放置板): 開場拍一張快照算好每件的座標, 之後手臂送 GET 就查表回座標。"""
+    """b 通道 (隨機位置放置板): 開場拍一張快照算好每件的座標, 之後手臂拉 DO[3] (arm_link 轉成 GET) 就查表回座標。"""
 
     def __init__(self, cap, profiles, practice):
         self.cap = cap
@@ -194,7 +194,7 @@ def main():
     try:
         print("[main] 階段一: 拍快照 (手臂勿在畫面內)")
         b.take_snapshot()
-        link.open()                                 # 快照完成才開始接受手臂連線
+        link.open()                                 # 快照完成才連上手臂 (Modbus TCP)
         print(f"[main] === 階段二: 可以按手臂了 ({arm_link.HOST}:{arm_link.PORT})"
               + ("  [練習模式]" if args.practice else "") + " ===")
 

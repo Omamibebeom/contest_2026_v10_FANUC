@@ -2,7 +2,7 @@
 arm_link.py —— B 通道: 用 Modbus TCP 和 FANUC 手臂交換「座標請求 / 座標資料」
 
 樹莓派當 Modbus TCP client, 連到手臂 ROBOT_IP:502 (手臂端是 Modbus server)。
-交握流程 (FANUC_工科賽通訊設定.pdf 的「訊號交握時序 - 取得座標」):
+交握流程 (FANUC_工科賽通訊設定v2.pdf 的「訊號交握時序 - 取得座標」):
   1. 手臂要下一件座標 → 把 DO[3] (COORD REQ) 拉 ON
   2. 本模組看到 DO[3]=ON → 回 "GET" 給主程式
   3. 主程式回 "$x,y" → 寫進 PR[1] (X, Y 是辨識值, Z/W/P/R 寫 0) → 再把 DO[4] (COORD ACK) 拉 ON

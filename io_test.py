@@ -1,17 +1,17 @@
 """
-io_test.py —— 賽前測試 放置板物件 (a 通道) 顏色 → IO 訊號 (接線、手臂解碼表)
+io_test.py —— 賽前測試 放置板物件 (a 通道) 顏色 → R[1] 代碼 (Modbus 寫入、手臂解碼表)
 
-畫面顯示: 目前看到的顏色 (只看 IO_CODES 裡的顏色, 取面積最大者)、ready 腳電位、a 通道狀態。
-手臂拉高 ready 時會和比賽一樣自動投票 VOTE_SEC 秒再送出 IO 訊號 (用的就是 main_contest.ChannelA),
-所以 io_test 測過的「ready → 訊號」迴路, 比賽時行為完全相同。
+畫面顯示: 目前看到的顏色 (只看 IO_CODES 裡的顏色, 取面積最大者)、DO[1] 狀態、a 通道狀態。
+手臂把 DO[1] 拉 ON 時會和比賽一樣自動投票 VOTE_SEC 秒再寫 R[1]、拉 DO[2] (用的就是 main_contest.ChannelA),
+所以 io_test 測過的「DO[1] → R[1]/DO[2]」迴路, 比賽時行為完全相同。
 鍵位:
-  1~9   送出 IO_CODES 裡第 1~9 個顏色的訊號 (不看相機, 純測接線)
+  1~9   送出 IO_CODES 裡第 1~9 個顏色的代碼 (不看相機, 純測 Modbus 寫入)
   f     送出失敗碼
-  0     全部繼電器關閉
+  0     清掉訊號 (DO[2] OFF、R[1] = 0)
   r     把目前看到的顏色送出去 (和比賽動作一樣)
   q     離開
 
-改訊號: 改 pi_gpio_controller.py 頂端的 IO_CODES。
+改代碼: 改 pi_gpio_controller.py 頂端的 IO_CODES。
 改顏色: 用 vision_tuner.py。
 """
 import cv2
@@ -19,7 +19,7 @@ import cv2
 import camera_config as cam
 from color_detect import load_profiles, detect_with_profiles
 from pi_gpio_controller import PiGPIOController, IO_CODES, FAIL_CODE
-from main_contest import ChannelA     # 沿用比賽的 ready → 投票 → 送 IO 狀態機 (import 不會開相機或 socket)
+from main_contest import ChannelA     # 沿用比賽的 DO[1] → 投票 → 寫 R[1] 狀態機 (import 不會開相機, 也不會連手臂)
 
 PROFILES_FILE = "vision_profiles.json"
 
@@ -31,8 +31,8 @@ def main():
     print(__doc__)
     print("[io] 數字鍵對應:")
     for i, n in enumerate(names, start=1):
-        print(f"      {i} = {n}  R2 R3 R4 = {IO_CODES[n]}")
-    print(f"      f = 失敗碼  R2 R3 R4 = {FAIL_CODE}")
+        print(f"      {i} = {n}  R[1] = {IO_CODES[n]}")
+    print(f"      f = 失敗碼  R[1] = {FAIL_CODE}")
     missing = [n for n in names if n not in [p.name for p in profiles]]
     if missing:
         print(f"[io] 注意: IO_CODES 的 {missing} 在 {PROFILES_FILE} 裡沒有, 先用 vision_tuner.py 存")
@@ -45,7 +45,7 @@ def main():
         return
 
     last = "-"
-    a = ChannelA(gpio, profiles)        # ready 拉高就自動辨識並送訊號
+    a = ChannelA(gpio, profiles)        # DO[1] 拉 ON 就自動辨識並寫 R[1]
     # 先用 WINDOW_NORMAL 建視窗, 使用者才能拖邊框改大小 (直接 imshow 會變成不能改的 AUTOSIZE)
     cv2.namedWindow("io_test", cv2.WINDOW_NORMAL)
     try:
@@ -53,7 +53,7 @@ def main():
             ok, frame = cap.read()
             if not ok:
                 continue
-            a.step(frame)                               # 手臂拉 ready → 自動投票 → 送 IO
+            a.step(frame)                               # 手臂拉 DO[1] → 自動投票 → 寫 R[1]
             objs, _ = detect_with_profiles(frame, a_profiles)
             seen = objs[0]["name"] if objs else None
 
