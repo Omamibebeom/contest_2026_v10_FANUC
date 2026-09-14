@@ -1,0 +1,6 @@
+# 樹莓派套件清單 (程式實際 import: cv2 / numpy / pymodbus)
+# 安裝 (樹莓派要先接上可上網的 Wi-Fi, 裝完再切回有線連手臂):
+#   pip install -r requirements_pi.txt --break-system-packages
+numpy>=2.0.2
+opencv-python>=4.11.0.86
+pymodbus>=3.10,<4    # 程式用的 device_id= 參數 3.10.0 起才有 (更早叫 slave=); 現場驗證過的版本是 3.15.0
