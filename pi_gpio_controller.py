@@ -1,113 +1,109 @@
 """
-pi_gpio_controller.py —— A 通道: 用 Modbus TCP 把「顏色」告訴 FANUC 手臂
+pi_gpio_controller.py —— 用 4 顆繼電器把「顏色」變成手臂看得懂的訊號
 
-交握流程 (FANUC_工科賽通訊設定v2.pdf 的「訊號交握時序 - 辨識顏色」):
-  1. 手臂到辨識位置 → 把 DO[1] (COLOR REQ) 拉 ON        ← ready() 讀這個
-  2. 主程式投票 3 秒決定顏色 → 呼叫 send(color)
-  3. send(): 寫 R[1] = 顏色代碼 → 等 1 秒 → 把 DO[2] (COLOR ACK) 拉 ON → 保持 HOLD_SEC 秒 → DO[2] OFF、R[1] = 0
-  4. 手臂讀 R[1] 後把 DO[1] 放下, 主程式才收下一件
-辨識失敗: send_fail() 只寫 R[1] = FAIL_CODE, 不拉 DO[2], 保持 FAIL_HOLD_SEC 秒後清掉。
+訊號規則 (手臂端照這個解碼):
+  1. R2 R3 R4 先擺好 3 位編碼
+  2. 等 1 秒
+  3. R1 拉高 (代表「可以讀了」), 保持 HOLD_SEC 秒
+  4. 全部關閉
+辨識失敗: R1 不拉高, R2 R3 R4 = FAIL_CODE, 保持 FAIL_HOLD_SEC 秒
 
-連線設定 (ROBOT_IP 等) 統一放在 arm_link.py, 這裡直接 import。
+不在樹莓派上跑時自動變成「模擬模式」: 只印字, 不動硬體。
+
+send() / send_fail() 各開一條背景計時, 不會等前一條結束: 兩次送訊號要間隔 8 秒以上 (1 + HOLD_SEC),
+否則前一條到點的 all_off() 會把後一個訊號提早關掉。比賽流程一件一件來不會碰到; io_test 手動按鍵時要留意。
 """
 import time
 import threading
-from pymodbus.client import ModbusTcpClient
 
-from arm_link import ROBOT_IP, ROBOT_PORT, DEVICE_ID
-
-# ======= 學生作答區: 放置板物件 (A 通道) 顏色 → R[1] 的數字代碼 =======
-# 顏色名要和 vision_profiles.json 存的名稱一樣 (小寫); 變數名必須是 IO_CODES (主程式會 import)
+# ======= 學生作答區: 放置板物件 (a 通道) 顏色 → IO 訊號 =======
+# 顏色名要和 vision_profiles.json 存的名稱一樣 (小寫)
+# 值是 (R2, R3, R4), 1 = 開, 0 = 關
 IO_CODES = {
-    "red": 1,
-    "blue": 2,
-    "green": 3,
+    "red":   (0, 0, 1),
+    "blue":  (0, 1, 0),
+    "green": (0, 1, 1),
 }
-FAIL_CODE = 99               # 辨識失敗時寫進 R[1] 的代碼 (DO[2] 不拉)
-HOLD_SEC = 7                 # DO[2] 拉 ON 後保持幾秒
-FAIL_HOLD_SEC = 10           # 失敗碼保持幾秒
+FAIL_CODE = (1, 1, 1)        # 辨識失敗時的 R2 R3 R4 (R1 不拉高); 要用 IO_CODES 沒用到的組合
+HOLD_SEC = 7                 # R1 拉高後保持幾秒
+FAIL_HOLD_SEC = 10           # 失敗碼保持幾秒 (要比手臂等 R1 的逾時更久)
 # ==========================================================
 
-# ---------- A 通道用到的 Modbus 位址 (pymodbus 是 0-based; FANUC 位址 - 1) ----------
-COIL_COLOR_REQ = 0           # DO[1] 顏色請求 (手臂拉)
-COIL_COLOR_ACK = 1           # DO[2] 顏色就緒 (我們拉)
-REG_COLOR = 0                # R[1] 顏色代碼 ($SNPX_ASG[1]: $ADDRESS=1, 'R[1]@1.1')
+RELAY_PINS = [17, 27, 22, 23]   # R1 R2 R3 R4 接的 GPIO (BCM 編號)
+READY_PIN = 26                  # 手臂 DO → 這支腳; 拉高 = 請開始辨識
+INVERSE_LOGIC = True            # True = 這種繼電器板是低電位吸合 (GPIO 拉低才導通); 換板子若相反就改 False
+
+try:
+    import RPi.GPIO as GPIO
+    HAVE_GPIO = True
+except (ImportError, RuntimeError):
+    HAVE_GPIO = False
+    print("[gpio] 沒有 GPIO 函式庫 → 模擬模式 (只印字, 不動硬體)")
 
 
 class PiGPIOController:
-    """類別名沿用, 主程式只用 ready() / send() / send_fail() / all_off() / cleanup()。"""
-
     def __init__(self):
-        self.client = ModbusTcpClient(ROBOT_IP, port=ROBOT_PORT)
-        self.lock = threading.Lock()        # send() 在背景 thread 寫, ready() 在主迴圈讀, 同一條連線要排隊
-        try:
-            if self.client.connect():
-                print(f"[io] 已連上 FANUC Modbus {ROBOT_IP}:{ROBOT_PORT}")
+        self.sim_ready = 0              # 模擬模式時 ready 腳的假值 (測試程式可以改它)
+        if not HAVE_GPIO:
+            return
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        for pin in RELAY_PINS:
+            GPIO.setup(pin, GPIO.OUT)
+        GPIO.setup(READY_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)   # 沒接線時穩定讀 0
+        self.all_off()
+
+    def _set(self, r1, r2, r3, r4):
+        """直接設定四顆繼電器 (1 = 開)。"""
+        if not HAVE_GPIO:
+            print(f"[gpio] R1 R2 R3 R4 = {r1} {r2} {r3} {r4}")
+            return
+        for pin, on in zip(RELAY_PINS, (r1, r2, r3, r4)):
+            if INVERSE_LOGIC:
+                GPIO.output(pin, GPIO.LOW if on else GPIO.HIGH)
             else:
-                print(f"[io] 連不上 {ROBOT_IP}:{ROBOT_PORT}, 之後會再試 (先跑 python3 arm_link.py 檢查)")
-        except Exception as e:
-            print(f"[io] 連線錯誤: {e}")
+                GPIO.output(pin, GPIO.HIGH if on else GPIO.LOW)
 
-    def _ensure_connection(self):
-        if not self.client.is_socket_open():
-            self.client.connect()
-
-    def ready(self):
-        """讀 DO[1]: 1 = 手臂請我們辨識, 0 = 沒有 (讀不到也回 0)。"""
-        try:
-            with self.lock:
-                self._ensure_connection()
-                res = self.client.read_coils(address=COIL_COLOR_REQ, count=1, device_id=DEVICE_ID)
-                if res and not res.isError():
-                    return 1 if res.bits[0] else 0
-        except Exception:
-            pass
-        return 0
+    def all_off(self):
+        self._set(0, 0, 0, 0)
 
     def send(self, color):
-        """辨識成功: 背景執行「寫 R[1] → 1 秒 → DO[2] ON → 保持 HOLD_SEC 秒 → 全清」, 不卡主迴圈。
-        顏色不在 IO_CODES 裡就當失敗。"""
-        code = IO_CODES.get(color, FAIL_CODE)
-        if code == FAIL_CODE:
+        """送出某個顏色的訊號 (背景執行, 不卡主程式)。顏色不在 IO_CODES 裡就送失敗碼。"""
+        if color not in IO_CODES:
             self.send_fail()
             return
+        r2, r3, r4 = IO_CODES[color]
 
         def run():
-            print(f"[io] {color} → R[1]={code}, 1 秒後 DO[2] ON, 保持 {HOLD_SEC} 秒")
-            with self.lock:
-                self._ensure_connection()
-                self.client.write_register(address=REG_COLOR, value=code, device_id=DEVICE_ID)
+            print(f"[gpio] {color} → R2 R3 R4 = {r2} {r3} {r4}; 1 秒後 R1 拉高, 保持 {HOLD_SEC} 秒")
+            self._set(0, r2, r3, r4)
             time.sleep(1)
-            with self.lock:
-                self.client.write_coil(address=COIL_COLOR_ACK, value=True, device_id=DEVICE_ID)
+            self._set(1, r2, r3, r4)
             time.sleep(HOLD_SEC)
             self.all_off()
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run).start()
 
     def send_fail(self):
-        """辨識失敗: 背景執行「寫 R[1]=FAIL_CODE (DO[2] 不拉) → 保持 FAIL_HOLD_SEC 秒 → 全清」。"""
+        """送出辨識失敗碼 (背景執行)。"""
+        r2, r3, r4 = FAIL_CODE
+
         def run():
-            print(f"[io] 辨識失敗 → R[1]={FAIL_CODE}, DO[2] 不拉, 保持 {FAIL_HOLD_SEC} 秒")
-            with self.lock:
-                self._ensure_connection()
-                self.client.write_register(address=REG_COLOR, value=FAIL_CODE, device_id=DEVICE_ID)
+            print(f"[gpio] 辨識失敗 → R2 R3 R4 = {r2} {r3} {r4}, R1 不拉高, 保持 {FAIL_HOLD_SEC} 秒")
+            self._set(0, r2, r3, r4)
             time.sleep(FAIL_HOLD_SEC)
             self.all_off()
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run).start()
 
-    def all_off(self):
-        """清掉訊號: DO[2] OFF、R[1] = 0。"""
-        try:
-            with self.lock:
-                self._ensure_connection()
-                self.client.write_coil(address=COIL_COLOR_ACK, value=False, device_id=DEVICE_ID)
-                self.client.write_register(address=REG_COLOR, value=0, device_id=DEVICE_ID)
-        except Exception:
-            pass
+    def ready(self):
+        """讀 ready 腳: 1 = 手臂請我們辨識。"""
+        if not HAVE_GPIO:
+            return self.sim_ready
+        return GPIO.input(READY_PIN)
 
     def cleanup(self):
-        """程式結束前關閉連線。"""
-        if self.client:
-            self.client.close()
+        """程式結束前: 全部關閉、釋放腳位。"""
+        if HAVE_GPIO:
+            self.all_off()
+            GPIO.cleanup()
