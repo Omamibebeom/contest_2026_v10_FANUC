@@ -1,36 +1,27 @@
-# 學生手冊 —— FANUC Modbus 版比賽程式
+# 學生手冊 —— FANUC 版比賽程式
 
-本手冊依目前 `contest_2026_v10_FANUC_modbus` 專案程式整理。
+本手冊依目前 `contest_2026_v10_FANUC` 專案程式整理。
 
 > **先記住一句話：**
-> - **A 通道：問「這是什麼顏色？」** → `DO[1] → R[1] → DO[2]`
-> - **B 通道：問「這個顏色在哪裡？」** → `DO[3] → PR[1] → DO[4]`
+> - **A 通道：問「這是什麼顏色？」** → 接線：`DO → GPIO26 → Relay R1～R4 → DI`；Modbus：`DO[1] → R[1] → DO[2]`
+> - **B 通道：問「這個顏色在哪裡？」** → `DO[3] → PR[1] → DO[4]`（Modbus）
 >
-> FANUC 版的 A、B 通道都使用 **Ethernet / Modbus TCP**。正式比賽不需要 Raspberry Pi GPIO ↔ Robot 的實體 Relay 配線。
+> **A 通道有兩種方式，兩種都是正式比賽的方式，學生自己選一種。** 程式兩條路同時開著：顏色訊號會同時送到 Relay（GPIO）和 Modbus（`R[1]`／`DO[2]`），Robot 端讀哪一邊都可以，不用改任何設定。
+>
+> - **方式 A（接線）**：照之前教材與研習營練習的做法——Relay R1～R4 接 Robot 實體 DI、Robot 實體 DO 接樹莓派 GPIO26，TP 讀 DI 判斷顏色。之前練好的接線、TP 流程不用改，直接上場。
+> - **方式 B（Modbus）**：TP 用 `DO[1]`／`R[1]`／`DO[2]` 交握，不用接 Relay、不用接 GPIO26，一條網路線完成全部。
+>
+> 兩種方式的時序與編碼完全一樣（同一個執行緒同時送兩邊），選其中一種就好，不需要兩種都做。B 通道只有 Modbus 一種。
 
 ---
 
 ## 0. 先進入專案資料夾
 
-壓縮檔內目前的正式資料夾名稱是：
-
 ```bash
 cd ~/Desktop/contest_2026_v10_FANUC
 ```
 
-如果你自己為了版本管理把資料夾改成：
-
-```text
-contest_2026_v10_FANUC_modbus
-```
-
-則改用：
-
-```bash
-cd ~/Desktop/contest_2026_v10_FANUC_modbus
-```
-
-**只改資料夾名稱即可。程式正式檔名仍要維持：**
+**資料夾名稱可以自己改，程式檔名不可以。正式檔名要維持：**
 
 ```text
 arm_link.py
@@ -125,7 +116,7 @@ Raspberry Pi 將 DO[4] OFF
 | `R[1]` | Holding Register | 0 | A 通道顏色代碼 |
 | `PR[1]` | Holding Registers | 1～12 | B 通道 X/Y/Z/W/P/R |
 
-Robot 端依廠商通訊設定文件確認：
+Robot 端依《工科賽通訊設定》PDF 確認：
 
 ```text
 Port#1 IP                    192.168.0.1
@@ -140,11 +131,9 @@ $SNPX_ASG[2]                 PR[1], ADDRESS 2, SIZE 12, MULTIPLY 0
 
 ---
 
-## 3. 為什麼 `pi_gpio_controller.py` 還有 Relay 程式？
+## 3. A 通道的兩條路：Relay 與 Modbus 怎麼同時運作
 
-這是 FANUC Modbus 版最容易混淆的地方。
-
-`pi_gpio_controller.py` 是四家共用的母版，因此檔案裡仍保留：
+`pi_gpio_controller.py` 是共用檔，負責接線那條路：
 
 ```text
 GPIO 17 / 27 / 22 / 23 → R1～R4 Relay
@@ -161,14 +150,14 @@ PiGPIOController.all_off()
 PiGPIOController.cleanup()
 ```
 
-但是 FANUC 的 `arm_link.py` 載入時會把這些方法換成 Modbus 版本：
+FANUC 的 `arm_link.py` 載入時會把這些方法換成「Relay 照做，再多做一份 Modbus」的版本：
 
 ```text
-原本 ready()     → 讀 Raspberry Pi GPIO 26
-FANUC ready()    → Modbus 讀 DO[1]
-
-原本 send()      → 控制 R1～R4 Relay
-FANUC send()     → Modbus 寫 R[1]、DO[2]
+ready()     → GPIO 26 拉高 或 Modbus 讀到 DO[1]=ON，任一個就算 Robot 請求辨識
+send()      → Relay R2 R3 R4 擺好、同時寫 R[1]
+              → 1 秒後 Relay R1 拉高、同時 DO[2] ON
+              → 保持 HOLD_SEC 秒 → Relay 全關、DO[2] OFF、R[1]=0
+send_fail() → Relay R2 R3 R4 = FAIL_CODE（R1 不拉高）、同時 R[1]=7（DO[2] 不 ON）
 ```
 
 也就是：
@@ -178,30 +167,24 @@ main_contest.py
       │
       │ 呼叫 PiGPIOController.ready() / send()
       ▼
-PiGPIOController 共同介面
+PiGPIOController 共同介面（FANUC arm_link.py 執行時替換方法）
       │
-      │ FANUC arm_link.py 執行時替換方法
-      ▼
-Modbus TCP
+      ├──▶ GPIO 17/27/22/23 → Relay R1～R4 → Robot 實體 DI     （方式 A）
+      │    GPIO 26 ← Robot 實體 DO
       │
-      ▼
-FANUC Robot
+      └──▶ Modbus TCP → R[1] / DO[2]，讀 DO[1]                  （方式 B）
 ```
 
 因此：
 
-- `pi_gpio_controller.py` **仍保留實體配線程式碼**。
-- FANUC 的 `main_contest.py` 正式執行時 **A 通道實際使用 Modbus TCP，不使用 Relay**。
-- A、B 兩個通道共用 `arm_link.py` 裡同一個 Modbus TCP client，並用 lock 排隊讀寫。
-- FANUC 比賽系統只需要 Ethernet 網路連線即可完成 A、B 通道交握。
+- 兩條路同時送、時序一樣，Robot 端讀 DI 或讀 `R[1]` 都正確。
+- 選方式 A 的學生，Modbus 連不上也沒關係：終端只會印一次「寫 R[1] 失敗」，Relay 照常。
+- 選方式 B 的學生不接 Relay，GPIO 17/27/22/23 空接即可。
+- B 通道一律 Modbus，和 A 通道共用 `arm_link.py` 裡同一個 Modbus TCP client，並用 lock 排隊讀寫。
 
-### `io_test.py` 的特別注意事項
+### `io_test.py` 的注意事項
 
-目前 `io_test.py` 會先建立 `PiGPIOController()`，之後才透過 `main_contest` 載入 `arm_link.py` 完成方法替換。
-
-因此在真正的 Raspberry Pi 上，如果 GPIO 函式庫存在，**啟動 `io_test.py` 的早期仍可能先初始化一次 GPIO 腳位**；後續 `ready()`、`send()`、`cleanup()` 才會改走 Modbus。
-
-FANUC 不需要接 Relay 才能測試，但若 GPIO 17、27、22、23 已接到其他硬體，測試前要特別留意。
+`io_test.py` 會先建立 `PiGPIOController()`，之後才透過 `main_contest` 載入 `arm_link.py` 完成方法替換；替換後 `ready()`、`send()`、`cleanup()` 同樣是兩條路一起動。按鍵送出的訊號 Relay 會動、`R[1]`／`DO[2]` 也會寫，所以兩種方式都用這一支測。
 
 ---
 
@@ -455,23 +438,23 @@ r    = 把目前鏡頭看到的顏色立即送出
 q    = 離開
 ```
 
-確認 FANUC：
+確認 FANUC（照你選的方式看其中一邊）：
 
 ```text
-R[1] 正確
-DO[2] 正常 ON/OFF
+方式 A：Robot I/O → Digital In，Relay 接的 DI 讀到對的 3-bit 碼；R1 那一路 1 秒後 ON、保持 7 秒
+方式 B：DATA → Registers 的 R[1] 正確；I/O → Digital Out 的 DO[2] 1 秒後 ON、保持 7 秒
 ```
 
 要測和比賽相同的完整 A 流程：
 
 ```text
 1. 把物件放到固定辨識位置
-2. FANUC DO[1] ON
+2. FANUC DO[1] ON（方式 B）或 實體 DO 拉高 GPIO26（方式 A）
 3. Raspberry Pi 投票 3 秒
-4. R[1] 寫入顏色
-5. 約第 4 秒 DO[2] ON
-6. Robot 讀 R[1]
-7. Robot DO[1] OFF
+4. R[1] 寫入顏色、Relay R2 R3 R4 擺好
+5. 約第 4 秒 DO[2] ON、Relay R1 ON
+6. Robot 讀 R[1]（方式 B）或 讀 DI（方式 A）
+7. Robot DO[1] OFF／實體 DO 放下
 ```
 
 目前成功訊號會讓 `DO[2]` 保持 `HOLD_SEC = 7` 秒後自動清除。
@@ -620,7 +603,7 @@ python3 main_contest.py --no-ui
 
 ## 9. Robot TP 交握重點
 
-### A 通道 TP 概念
+### A 通道 TP 概念（方式 B：Modbus）
 
 ```text
 移到固定辨識位置
@@ -638,6 +621,25 @@ DO[1] = OFF
 ```
 
 `DO[1]` 一定要放回 OFF，因為 `ChannelA` 會進入 `WAIT_RELEASE`，只有看到 DO[1] OFF 才接受下一件。
+
+### A 通道 TP 概念（方式 A：接線）
+
+```text
+移到固定辨識位置
+↓
+實體 DO = ON（拉高樹莓派 GPIO26）
+↓
+WAIT R1 那一路的 DI = ON（約 8 秒 timeout）
+↓
+成功：讀 R2 R3 R4 三路 DI → 3-bit 碼（IO_CODES）
+失敗 timeout：讀三路 DI 是否為 1 1 1
+↓
+實體 DO = OFF
+↓
+下一件前確認 R1 那一路已回 OFF
+```
+
+接線的點位編號與電氣規格依先前發放的接線說明；時序與方式 B 完全相同。
 
 ### B 通道 TP 概念
 
@@ -770,8 +772,8 @@ Ctrl + C
 
 > **2. B 通道：`DO[3] ON → PR[1] X/Y → DO[4] ON → Robot 讀完後 DO[3] OFF`。**
 
-> **3. FANUC A、B 都走同一條 Ethernet / Modbus TCP，不需要 Relay 配線。**
+> **3. A 通道接線（Relay）與 Modbus 兩種方式都是正式比賽的方式，自己選一種；B 通道只有 Modbus。**
 
-> **4. `pi_gpio_controller.py` 的實體 GPIO 程式仍保留，但 FANUC `arm_link.py` 會在執行時把主要方法替換成 Modbus 版本。**
+> **4. 程式兩條路同時送、時序一樣：之前練的接線與 TP 流程照常可用，選 Modbus 的則不用接線。**
 
 > **5. 正式比賽一定要等主程式顯示「階段二：可以按手臂了」後，才啟動 Robot。**

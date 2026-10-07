@@ -9,16 +9,18 @@ a、b 兩個通道都走這一條 Modbus 連線, 位址對照 (ROBOT端設定見
 
 a 通道 (顏色, PDF「辨識顏色 - 訊號交握時序」):
   主程式和 io_test.py 都是透過 pi_gpio_controller.PiGPIOController 送顏色。本檔在 import 時把該類別的
-  ready() / send() / send_fail() / all_off() / cleanup() / __init__() 換成下面的 Modbus 版本
+  ready() / send() / send_fail() / all_off() / cleanup() / __init__() 換成「繼電器 + Modbus 一起做」的版本:
+  繼電器 R1~R4 與 GPIO26 照 pi_gpio_controller.py 原本的時序輸出, 同一時刻再多寫一份到 Modbus,
+  ROBOT 端用實體 DI 讀或用 R[1] 讀都可以; ready 也是兩邊擇一 (GPIO26 拉高 或 DO[1]=ON)
   (main_contest.py 先 import arm_link、再 import pi_gpio_controller, 所以替換會在建立物件之前生效;
   io_test.py 是先建物件再載入 main_contest, 方法掛在類別上, 已建立的物件一樣會改用 Modbus)。
   pi_gpio_controller.py 本身不用改, 學生作答的 IO_CODES / FAIL_CODE / HOLD_SEC / FAIL_HOLD_SEC 照常從那裡讀:
-    1. ROBOT到辨識位置 → DO[1] (顏色請求) ON                ← ready() 讀 Coil 0
+    1. ROBOT到辨識位置 → DO[1] (顏色請求) ON 或 實體 DO 拉高 GPIO26   ← ready() 兩邊任一
     2. 主程式投票 3 秒決定顏色 → send(color)
-    3. send(): IO_CODES 的 (R2, R3, R4) 當 3-bit 二進位 → R[1] = R2*4 + R3*2 + R4 (預設 red=1 blue=2 green=3)
-              → 等 1 秒 → DO[2] (顏色確認) ON → 保持 HOLD_SEC 秒 → DO[2] OFF、R[1] = 0
-       辨識失敗: send_fail() 只寫 R[1] = FAIL_CODE 換算的數字 (預設 (1,1,1) = 7), 不拉 DO[2], 保持 FAIL_HOLD_SEC 秒後清 0
-    4. ROBOT讀 R[1] 後把 DO[1] 放 OFF, 主程式才收下一件
+    3. send(): 繼電器 R2 R3 R4 = IO_CODES 的 (R2, R3, R4); 同一組當 3-bit 二進位 → R[1] = R2*4 + R3*2 + R4 (預設 red=1 blue=2 green=3)
+              → 等 1 秒 → R1 拉高 / DO[2] (顏色確認) ON → 保持 HOLD_SEC 秒 → 全關、DO[2] OFF、R[1] = 0
+       辨識失敗: send_fail() 繼電器 R2 R3 R4 = FAIL_CODE、R1 不拉高; R[1] = FAIL_CODE 換算的數字 (預設 (1,1,1) = 7), 不拉 DO[2]; 保持 FAIL_HOLD_SEC 秒後清 0
+    4. ROBOT讀 R[1] (或實體 DI) 後把 DO[1] / 實體 DO 放 OFF, 主程式才收下一件
 
 b 通道 (座標, PDF「取得座標 - 訊號交握時序」):
     1. ROBOT要下一件座標 → DO[3] (座標請求) ON
@@ -149,37 +151,49 @@ def _code_of(bits):
     return int(r2) * 4 + int(r3) * 2 + int(r4)
 
 
+# ---- 保留 pi_gpio_controller 原本的方法 (繼電器那一半), 下面的新方法會呼叫它們 ----
+_gpio_init = pi_gpio_controller.PiGPIOController.__init__
+_gpio_ready = pi_gpio_controller.PiGPIOController.ready
+_gpio_cleanup = pi_gpio_controller.PiGPIOController.cleanup
+
+
 def _a_init(self):
-    """不碰 GPIO。先把 DO[2]、R[1] 清 0 (連不上就等第一次讀寫時再連)。"""
-    print(f"[I/O] a 通道走 Modbus: DO[1] → R[1] / DO[2] ({ROBOT_IP}:{ROBOT_PORT})")
+    """繼電器 GPIO 照常初始化, 再把 Modbus 這邊的 DO[2]、R[1] 清 0 (連不上就等第一次讀寫時再連)。"""
+    _gpio_init(self)
+    print(f"[I/O] a 通道同時走 Modbus: DO[1] → R[1] / DO[2] ({ROBOT_IP}:{ROBOT_PORT}); 繼電器 R1~R4 照常輸出")
     _a_all_off(self)
 
 
 def _a_ready(self):
-    """讀 DO[1]: 1 = ROBOT請我們辨識, 0 = 沒有 (讀不到也回 0)。"""
-    return 1 if _read_coil(COIL_COLOR_REQ) else 0
+    """GPIO26 拉高 或 DO[1]=ON, 任一個就算 ROBOT 請我們辨識 (Modbus 讀不到當 0)。"""
+    return 1 if (_gpio_ready(self) == 1 or _read_coil(COIL_COLOR_REQ)) else 0
 
 
 def _a_all_off(self):
-    """清掉訊號: DO[2] OFF、R[1] = 0。"""
+    """清掉兩邊的訊號: 繼電器全關、DO[2] OFF、R[1] = 0。"""
+    self._set(0, 0, 0, 0)                      # pi_gpio_controller 原本的低階方法, 未被替換
     _write_coil(COIL_COLOR_ACK, False)
     _write_regs(REG_COLOR, [0])
 
 
 def _a_send(self, color):
-    """辨識成功: 背景執行「寫 R[1] → 1 秒 → DO[2] ON → 保持 HOLD_SEC 秒 → 全清」, 不卡主迴圈。
+    """辨識成功, 背景執行、不卡主迴圈, 兩條路同一時序:
+    繼電器: R2 R3 R4 擺好 → 1 秒 → R1 拉高 → 保持 HOLD_SEC 秒 → 全關
+    Modbus: 寫 R[1]        → 1 秒 → DO[2] ON → 保持 HOLD_SEC 秒 → DO[2] OFF、R[1] = 0
     顏色不在 IO_CODES 裡就當失敗。"""
     if color not in IO_CODES:
         _a_send_fail(self)
         return
-    code = _code_of(IO_CODES[color])
+    r2, r3, r4 = IO_CODES[color]
+    code = _code_of((r2, r3, r4))
 
     def run():
-        print(f"[I/O] {color} → R[1]={code}; 1 秒後 DO[2] ON, 保持 {HOLD_SEC} 秒")
+        print(f"[I/O] {color} → R2 R3 R4 = {r2} {r3} {r4}, R[1]={code}; 1 秒後 R1 拉高 / DO[2] ON, 保持 {HOLD_SEC} 秒")
+        self._set(0, r2, r3, r4)
         if not _write_regs(REG_COLOR, [code]):
-            print("[I/O] 寫 R[1] 失敗 (連不上ROBOT?), 這次不拉 DO[2]")
-            return
+            print("[I/O] 寫 R[1] 失敗 (連不上ROBOT?), 這次 Modbus 不拉 DO[2], 繼電器照常")
         time.sleep(1)
+        self._set(1, r2, r3, r4)
         _write_coil(COIL_COLOR_ACK, True)
         time.sleep(HOLD_SEC)
         _a_all_off(self)
@@ -188,11 +202,14 @@ def _a_send(self, color):
 
 
 def _a_send_fail(self):
-    """辨識失敗: 背景執行「寫 R[1] = 失敗碼 (DO[2] 不拉) → 保持 FAIL_HOLD_SEC 秒 → 全清」。"""
+    """辨識失敗, 兩條路同一時序: 繼電器 R1 不拉高、R2 R3 R4 = FAIL_CODE; Modbus 寫 R[1] = 失敗碼、DO[2] 不拉;
+    保持 FAIL_HOLD_SEC 秒後全清。"""
+    r2, r3, r4 = FAIL_CODE
     code = _code_of(FAIL_CODE)
 
     def run():
-        print(f"[I/O] 辨識失敗 → R[1]={code}, DO[2] 不拉, 保持 {FAIL_HOLD_SEC} 秒")
+        print(f"[I/O] 辨識失敗 → R2 R3 R4 = {r2} {r3} {r4}, R[1]={code}; R1 不拉高 / DO[2] 不拉, 保持 {FAIL_HOLD_SEC} 秒")
+        self._set(0, r2, r3, r4)
         _write_regs(REG_COLOR, [code])
         time.sleep(FAIL_HOLD_SEC)
         _a_all_off(self)
@@ -201,9 +218,10 @@ def _a_send_fail(self):
 
 
 def _a_cleanup(self):
-    """程式結束前: 清掉訊號、關閉連線。"""
+    """程式結束前: 兩邊都清掉、關閉 Modbus 連線、釋放 GPIO。"""
     _a_all_off(self)
     _close()
+    _gpio_cleanup(self)
 
 
 pi_gpio_controller.PiGPIOController.__init__ = _a_init
